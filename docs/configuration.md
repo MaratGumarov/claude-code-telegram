@@ -52,9 +52,8 @@ AUTH_TOKEN_SECRET=your-secret-key-here
 #### Claude Configuration
 
 ```bash
-# Integration Method
-USE_SDK=true                          # Use Python SDK (default) or CLI subprocess
-ANTHROPIC_API_KEY=sk-ant-api03-...    # Optional: API key for SDK integration
+# Claude CLI path (optional, auto-detected if not specified)
+CLAUDE_CLI_PATH=/path/to/claude
 
 # Maximum conversation turns before requiring new session
 CLAUDE_MAX_TURNS=10
@@ -326,46 +325,41 @@ This will show detailed logging of configuration loading and validation.
 - **Restrict `APPROVED_DIRECTORY`** to only necessary paths
 - **Monitor logs** for configuration errors and security events
 
-## Claude Integration Options
+## Claude Integration
 
-### SDK vs CLI Mode
+The bot uses the official `claude-agent-sdk` for reliable integration with Claude Code.
 
-The bot supports two integration methods with Claude:
+### Installation
 
-1. **SDK Mode (Default)**: Uses the Claude Code Python SDK for direct API integration
-   - Better performance and streaming support
-   - Can use existing Claude CLI authentication or API key
-   - More reliable error handling
+The SDK is automatically installed via Poetry dependencies:
 
-2. **CLI Mode**: Uses Claude Code CLI subprocess
-   - Requires Claude Code CLI installation
-   - Uses CLI authentication only
-   - Legacy mode for compatibility
-
-### Authentication Options
-
-#### Option 1: Use Existing Claude CLI Authentication (Recommended)
 ```bash
-# Install and authenticate Claude CLI
+poetry install
+```
+
+### Authentication
+
+The bot uses Claude CLI authentication. Ensure you're logged in:
+
+```bash
+# Check authentication status
+claude auth status
+
+# Login if needed
 claude auth login
-
-# Configure bot to use SDK with CLI auth
-USE_SDK=true
-# No ANTHROPIC_API_KEY needed - SDK will use CLI credentials
 ```
 
-#### Option 2: Direct API Key
-```bash
-# Configure bot with API key
-USE_SDK=true
-ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
-```
+### Configuration
 
-#### Option 3: CLI Mode (Legacy)
 ```bash
-# Use CLI subprocess instead of SDK
-USE_SDK=false
-# Requires Claude CLI to be installed and authenticated
+# Claude CLI path (optional, auto-detected)
+CLAUDE_CLI_PATH=/usr/local/bin/claude
+
+# Maximum cost per user in USD
+CLAUDE_MAX_COST_PER_USER=10.0
+
+# Allowed tools
+CLAUDE_ALLOWED_TOOLS=Read,Write,Edit,Bash,Glob,Grep,LS,Task,MultiEdit,NotebookRead,NotebookEdit,WebFetch,TodoRead,TodoWrite,WebSearch
 ```
 
 ## Example .env File
@@ -384,8 +378,10 @@ ENABLE_TOKEN_AUTH=false
 AUTH_TOKEN_SECRET=
 
 # Claude Integration
-USE_SDK=true                          # Use Python SDK (recommended)
-ANTHROPIC_API_KEY=                    # Optional: Only if not using CLI auth
+CLAUDE_CLI_PATH=                      # Optional: Path to Claude CLI (auto-detected)
+CLAUDE_MAX_COST_PER_USER=10.0
+CLAUDE_TIMEOUT_SECONDS=300
+CLAUDE_ALLOWED_TOOLS=Read,Write,Edit,Bash,Glob,Grep,LS,Task,MultiEdit,NotebookRead,NotebookEdit,WebFetch,TodoRead,TodoWrite,WebSearch
 
 # Rate Limiting
 RATE_LIMIT_REQUESTS=10

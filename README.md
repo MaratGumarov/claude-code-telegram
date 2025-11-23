@@ -66,7 +66,6 @@ This project is actively being developed. Here's the current status of features:
 - **💡 Smart Suggestions**: AI-powered follow-up action recommendations
 
 #### 🔄 **Planned Enhancements**
-- True streaming responses with real-time updates
 - Claude vision API integration for full image analysis
 - Custom quick actions configuration
 - Advanced Git operations (when security permits)
@@ -75,9 +74,10 @@ This project is actively being developed. Here's the current status of features:
 - Webhook support for CI/CD integration
 
 ### 🤖 Claude AI Integration
-- **Full Claude Code Access**: Complete integration with Claude's powerful coding assistant
+- **Official SDK Integration**: Built on `claude-agent-sdk` for reliable, native Claude Code access
+- **Real-time Streaming**: Live tool execution updates with status indicators (⏳ → ✓)
 - **Session Persistence**: Maintain conversation context with SQLite database storage
-- **SDK & CLI Support**: Works with both Anthropic Python SDK and Claude CLI
+- **Enhanced UX**: Chronological event display with tool icons and key parameters
 - **Error Recovery**: Intelligent error handling with helpful suggestions and retry logic
 - **Tool Support**: Access to Claude's full toolkit including file operations, code analysis, and more
 
