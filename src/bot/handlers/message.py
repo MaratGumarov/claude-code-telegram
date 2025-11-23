@@ -12,6 +12,7 @@ from ...config.settings import Settings
 from ...security.audit import AuditLogger
 from ...security.rate_limiter import RateLimiter
 from ...security.validators import SecurityValidator
+from ..context_manager import ContextManager
 
 logger = structlog.get_logger()
 
@@ -155,14 +156,8 @@ async def handle_text_message(
                 await update.message.reply_text(f"⏱️ {limit_message}")
                 return
 
-        # Send typing indicator
+        # Send typing action to indicate bot is working
         await update.message.chat.send_action("typing")
-
-        # Create progress message
-        progress_msg = await update.message.reply_text(
-            "🤔 Processing your request...",
-            reply_to_message_id=update.message.message_id,
-        )
 
         # Get Claude integration and storage from context
         claude_integration = context.bot_data.get("claude_integration")
@@ -178,21 +173,89 @@ async def handle_text_message(
             return
 
         # Get current directory
-        current_dir = context.user_data.get(
-            "current_directory", settings.approved_directory
-        )
+        current_dir = ContextManager.get_current_directory(update, context, settings)
 
         # Get existing session ID
-        session_id = context.user_data.get("claude_session_id")
+        session_id = ContextManager.get_session_id(update, context)
 
-        # Enhanced stream updates handler with progress tracking
+        # Enhanced stream updates handler with progress tracking and text streaming
+        import time
+        
+        # State for streaming
+        stream_state = {
+            "last_update_time": 0,
+            "accumulated_text": "",
+            "current_message": None,  # The message we are currently appending text to
+            "last_typing_time": 0
+        }
+        
         async def stream_handler(update_obj):
             try:
-                progress_text = await _format_progress_update(update_obj)
-                if progress_text:
-                    await progress_msg.edit_text(progress_text, parse_mode="Markdown")
+                current_time = time.time()
+                
+                # Keep typing status active (every 4 seconds)
+                if current_time - stream_state["last_typing_time"] >= 4.0:
+                    await update.message.chat.send_action("typing")
+                    stream_state["last_typing_time"] = current_time
+
+                # Handle different update types
+                if update_obj.type == "assistant" and update_obj.tool_calls:
+                    # Tool call started - Send a NEW message
+                    tool_names = update_obj.get_tool_names()
+                    if tool_names:
+                        tool_name = tool_names[0]
+                        await update.message.reply_text(
+                            f"🛠️ Using tool: `{tool_name}`...",
+                            parse_mode="Markdown"
+                        )
+                        # Reset current text message so next text starts a new block
+                        stream_state["current_message"] = None
+                        stream_state["accumulated_text"] = ""
+                        
+                elif update_obj.type == "assistant" and update_obj.content:
+                    # Text content
+                    new_content = update_obj.content
+                    stream_state["accumulated_text"] += new_content
+                    
+                    # Throttling for text updates
+                    if (current_time - stream_state["last_update_time"] >= 0.5) or len(new_content) > 50:
+                        text_to_show = stream_state["accumulated_text"]
+                        if len(text_to_show) > 4000:
+                            text_to_show = text_to_show[-4000:] # Keep last 4000 chars if too long
+                            
+                        if stream_state["current_message"]:
+                            # Edit existing message
+                            try:
+                                await stream_state["current_message"].edit_text(
+                                    text_to_show, parse_mode="Markdown"
+                                )
+                            except Exception:
+                                # If edit fails (e.g. same content), ignore
+                                pass
+                        else:
+                            # Send new message
+                            if text_to_show.strip():
+                                stream_state["current_message"] = await update.message.reply_text(
+                                    text_to_show, parse_mode="Markdown"
+                                )
+                        
+                        stream_state["last_update_time"] = current_time
+                            
             except Exception as e:
-                logger.warning("Failed to update progress message", error=str(e))
+                logger.warning("Failed to update stream", error=str(e))
+
+        # Background task to keep typing status active
+        async def keep_typing():
+            try:
+                while True:
+                    await update.message.chat.send_action("typing")
+                    await asyncio.sleep(4)
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.warning("Typing task failed", error=str(e))
+
+        typing_task = asyncio.create_task(keep_typing())
 
         # Run Claude command
         try:
@@ -205,11 +268,11 @@ async def handle_text_message(
             )
 
             # Update session ID
-            context.user_data["claude_session_id"] = claude_response.session_id
+            ContextManager.set_session_id(update, context, claude_response.session_id)
 
             # Check if Claude changed the working directory and update our tracking
             _update_working_directory_from_claude_response(
-                claude_response, context, settings, user_id
+                claude_response, update, context, settings, user_id
             )
 
             # Log interaction to storage
@@ -225,14 +288,6 @@ async def handle_text_message(
                 except Exception as e:
                     logger.warning("Failed to log interaction to storage", error=str(e))
 
-            # Format response
-            from ..utils.formatting import ResponseFormatter
-
-            formatter = ResponseFormatter(settings)
-            formatted_messages = formatter.format_claude_response(
-                claude_response.content
-            )
-
         except ClaudeToolValidationError as e:
             # Tool validation error with detailed instructions
             logger.error(
@@ -243,46 +298,83 @@ async def handle_text_message(
             )
             # Error message already formatted, create FormattedMessage
             from ..utils.formatting import FormattedMessage
-
             formatted_messages = [FormattedMessage(str(e), parse_mode="Markdown")]
+            
         except Exception as e:
-            logger.error("Claude integration failed", error=str(e), user_id=user_id)
-            # Format error and create FormattedMessage
+            # Generic error
+            logger.error("Error running Claude command", error=str(e), user_id=user_id)
             from ..utils.formatting import FormattedMessage
-
+            
             formatted_messages = [
-                FormattedMessage(_format_error_message(str(e)), parse_mode="Markdown")
+                FormattedMessage(
+                    f"❌ **Error**\n\nAn unexpected error occurred: {str(e)}",
+                    parse_mode="Markdown"
+                )
             ]
 
-        # Delete progress message
-        await progress_msg.delete()
+        finally:
+            # Stop typing task
+            typing_task.cancel()
+            try:
+                await typing_task
+            except asyncio.CancelledError:
+                pass
+
+            # Format response if not already formatted (success case)
+            if 'formatted_messages' not in locals():
+                if 'claude_response' in locals():
+                    from ..utils.formatting import ResponseFormatter
+                    formatter = ResponseFormatter(settings)
+                    formatted_messages = formatter.format_claude_response(
+                        claude_response.content
+                    )
+                else:
+                    # Fallback if claude_response is not defined (should be handled by except blocks, but just in case)
+                    from ..utils.formatting import FormattedMessage
+                    formatted_messages = [
+                        FormattedMessage(
+                            "❌ **Error**\n\nFailed to get response from Claude.",
+                            parse_mode="Markdown"
+                        )
+                    ]
 
         # Send formatted responses (may be multiple messages)
-        for i, message in enumerate(formatted_messages):
-            try:
-                await update.message.reply_text(
-                    message.text,
-                    parse_mode=message.parse_mode,
-                    reply_markup=message.reply_markup,
-                    reply_to_message_id=update.message.message_id if i == 0 else None,
-                )
+        # Only send if it's an error message or if we didn't stream anything
+        should_send = False
+        if 'formatted_messages' in locals():
+            # Check if it's an error message
+            if any("❌" in msg.text for msg in formatted_messages):
+                should_send = True
+            # Or if we didn't stream any text content
+            elif not stream_state.get("accumulated_text"):
+                should_send = True
 
-                # Small delay between messages to avoid rate limits
-                if i < len(formatted_messages) - 1:
-                    await asyncio.sleep(0.5)
+        if should_send:
+            for i, message in enumerate(formatted_messages):
+                try:
+                    await update.message.reply_text(
+                        message.text,
+                        parse_mode=message.parse_mode,
+                        reply_markup=message.reply_markup,
+                        reply_to_message_id=update.message.message_id if i == 0 else None,
+                    )
 
-            except Exception as e:
-                logger.error(
-                    "Failed to send response message", error=str(e), message_index=i
-                )
-                # Try to send error message
-                await update.message.reply_text(
-                    "❌ Failed to send response. Please try again.",
-                    reply_to_message_id=update.message.message_id if i == 0 else None,
-                )
+                    # Small delay between messages to avoid rate limits
+                    if i < len(formatted_messages) - 1:
+                        await asyncio.sleep(0.5)
+
+                except Exception as e:
+                    logger.error(
+                        "Failed to send response message", error=str(e), message_index=i
+                    )
+                    # Try to send error message
+                    await update.message.reply_text(
+                        "❌ Failed to send response. Please try again.",
+                        reply_to_message_id=update.message.message_id if i == 0 else None,
+                    )
 
         # Update session info
-        context.user_data["last_message"] = update.message.text
+        # context.user_data["last_message"] = update.message.text  # TODO: Check if needed for topics
 
         # Add conversation enhancements if available
         features = context.bot_data.get("features")
@@ -509,10 +601,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
 
         # Get current directory and session
-        current_dir = context.user_data.get(
-            "current_directory", settings.approved_directory
-        )
-        session_id = context.user_data.get("claude_session_id")
+        current_dir = ContextManager.get_current_directory(update, context, settings)
+        session_id = ContextManager.get_session_id(update, context)
 
         # Process with Claude
         try:
@@ -524,11 +614,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
 
             # Update session ID
-            context.user_data["claude_session_id"] = claude_response.session_id
+            ContextManager.set_session_id(update, context, claude_response.session_id)
 
             # Check if Claude changed the working directory and update our tracking
             _update_working_directory_from_claude_response(
-                claude_response, context, settings, user_id
+                claude_response, update, context, settings, user_id
             )
 
             # Format and send response
@@ -636,10 +726,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 return
 
             # Get current directory and session
-            current_dir = context.user_data.get(
-                "current_directory", settings.approved_directory
-            )
-            session_id = context.user_data.get("claude_session_id")
+            current_dir = ContextManager.get_current_directory(update, context, settings)
+            session_id = ContextManager.get_session_id(update, context)
 
             # Process with Claude
             try:
@@ -651,7 +739,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 )
 
                 # Update session ID
-                context.user_data["claude_session_id"] = claude_response.session_id
+                ContextManager.set_session_id(update, context, claude_response.session_id)
 
                 # Format and send response
                 from ..utils.formatting import ResponseFormatter
@@ -822,7 +910,7 @@ async def _generate_placeholder_response(
 
 
 def _update_working_directory_from_claude_response(
-    claude_response, context, settings, user_id
+    claude_response, update, context, settings, user_id
 ):
     """Update the working directory based on Claude's response content."""
     import re
@@ -838,9 +926,7 @@ def _update_working_directory_from_claude_response(
     ]
 
     content = claude_response.content.lower()
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
-    )
+    current_dir = ContextManager.get_current_directory(update, context, settings)
 
     for pattern in patterns:
         matches = re.findall(pattern, content, re.MULTILINE | re.IGNORECASE)
@@ -864,7 +950,7 @@ def _update_working_directory_from_claude_response(
                     new_path.is_relative_to(settings.approved_directory)
                     and new_path.exists()
                 ):
-                    context.user_data["current_directory"] = new_path
+                    ContextManager.set_current_directory(update, context, new_path)
                     logger.info(
                         "Updated working directory from Claude response",
                         old_dir=str(current_dir),

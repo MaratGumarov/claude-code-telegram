@@ -5,10 +5,12 @@ Provides context-aware quick action suggestions for common development tasks.
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from src.bot.features.custom_commands import scan_commands
 from src.storage.models import SessionModel
 
 logger = logging.getLogger(__name__)
@@ -122,26 +124,37 @@ class QuickActionManager:
         }
 
     async def get_suggestions(
-        self, session: SessionModel, limit: int = 6
+        self,
+        session: Optional[SessionModel] = None,
+        limit: int = 6,
+        session_data: Optional[Dict[str, Any]] = None,
+        working_directory: Optional[Path] = None,
     ) -> List[QuickAction]:
         """Get quick action suggestions based on session context.
 
         Args:
-            session: Current session
+            session: Current session (optional)
             limit: Maximum number of suggestions
+            session_data: Ad-hoc session data (optional)
+            working_directory: Current working directory for custom commands
 
         Returns:
             List of suggested actions
         """
         try:
             # Analyze context
-            context = await self._analyze_context(session)
+            context = await self._analyze_context(session, session_data)
 
             # Filter actions based on context
             available_actions = []
             for action in self.actions.values():
                 if self._is_action_available(action, context):
                     available_actions.append(action)
+            
+            # Add custom commands if working directory is provided
+            if working_directory:
+                custom_actions = self._get_custom_command_actions(working_directory)
+                available_actions.extend(custom_actions)
 
             # Sort by priority and return top N
             available_actions.sort(key=lambda x: x.priority, reverse=True)
@@ -151,11 +164,16 @@ class QuickActionManager:
             self.logger.error(f"Error getting suggestions: {e}")
             return []
 
-    async def _analyze_context(self, session: SessionModel) -> Dict[str, Any]:
+    async def _analyze_context(
+        self,
+        session: Optional[SessionModel] = None,
+        session_data: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Analyze session context to determine available actions.
 
         Args:
             session: Current session
+            session_data: Ad-hoc session data
 
         Returns:
             Context dictionary
@@ -170,7 +188,7 @@ class QuickActionManager:
         }
 
         # Analyze recent messages for context clues
-        if session.context:
+        if session and hasattr(session, "context") and session.context:
             recent_messages = session.context.get("recent_messages", [])
             for msg in recent_messages:
                 content = msg.get("content", "").lower()
@@ -216,6 +234,40 @@ class QuickActionManager:
             if not context.get(key, False):
                 return False
         return True
+    
+    def _get_custom_command_actions(self, working_directory: Path) -> List[QuickAction]:
+        """Convert custom commands to QuickAction objects.
+        
+        Args:
+            working_directory: Current working directory
+            
+        Returns:
+            List of QuickAction objects for custom commands
+        """
+        custom_actions = []
+        
+        try:
+            commands = scan_commands(working_directory)
+            
+            # Limit to 3 custom commands to avoid clutter
+            for i, cmd in enumerate(commands[:3]):
+                # Create QuickAction from CustomCommand
+                action = QuickAction(
+                    id=f"custom_cmd:{cmd.name}",
+                    name=cmd.name.replace("_", " ").title(),
+                    description=cmd.description,
+                    command=cmd.prompt,
+                    icon="⚡",
+                    category="custom",
+                    context_required=[],  # Custom commands are always available
+                    priority=15 - i,  # Higher priority than default actions
+                )
+                custom_actions.append(action)
+        
+        except Exception as e:
+            self.logger.warning(f"Failed to load custom commands: {e}")
+        
+        return custom_actions
 
     def create_inline_keyboard(
         self, actions: List[QuickAction], columns: int = 2

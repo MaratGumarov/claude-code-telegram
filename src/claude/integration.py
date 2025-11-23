@@ -242,6 +242,9 @@ class ClaudeProcessManager:
                     parsing_errors.append(f"Invalid message structure: {line[:100]}")
                     continue
 
+                # DEBUG: Log all message types to understand streaming format
+                logger.info("Stream message received", msg_type=msg.get("type"), has_delta=("delta" in msg))
+
                 message_buffer.append(msg)
 
                 # Process immediately to avoid memory buildup
@@ -371,6 +374,13 @@ class ClaudeProcessManager:
             return self._parse_error_message(msg)
         elif msg_type == "progress":
             return self._parse_progress_message(msg)
+        # Add support for streaming delta events
+        elif msg_type == "content_block_delta":
+            return self._parse_content_block_delta(msg)
+        elif msg_type == "content_block_start":
+            return self._parse_content_block_start(msg)
+        elif msg_type == "content_block_stop":
+            return self._parse_content_block_stop(msg)
 
         # Unknown message type - log and continue
         logger.debug("Unknown message type", msg_type=msg_type, msg=msg)
@@ -541,6 +551,74 @@ class ClaudeProcessManager:
             is_error=result.get("is_error", False),
             error_type=result.get("subtype") if result.get("is_error") else None,
             tools_used=tools_used,
+        )
+
+    def _parse_content_block_delta(self, msg: Dict) -> StreamUpdate:
+        """Parse incremental content block delta for true streaming."""
+        delta = msg.get("delta", {})
+        delta_type = delta.get("type")
+        
+        # Extract text delta for incremental updates
+        if delta_type == "text_delta":
+            text = delta.get("text", "")
+            return StreamUpdate(
+                type="assistant",
+                content=text,
+                metadata={
+                    "delta": True,
+                    "content_block_index": msg.get("index"),
+                },
+                timestamp=msg.get("timestamp"),
+            )
+        
+        # Unknown delta type
+        logger.debug("Unknown delta type", delta_type=delta_type)
+        return None
+    
+    def _parse_content_block_start(self, msg: Dict) -> StreamUpdate:
+        """Parse content block start event."""
+        content_block = msg.get("content_block", {})
+        block_type = content_block.get("type")
+        
+        if block_type == "text":
+            # Text block started, may have initial text
+            text = content_block.get("text", "")
+            return StreamUpdate(
+                type="assistant",
+                content=text if text else None,
+                metadata={
+                    "block_start": True,
+                    "content_block_index": msg.get("index"),
+                },
+                timestamp=msg.get("timestamp"),
+            )
+        elif block_type == "tool_use":
+            # Tool use started
+            return StreamUpdate(
+                type="assistant",
+                tool_calls=[{
+                    "name": content_block.get("name"),
+                    "id": content_block.get("id"),
+                    "input": {},  # Input will come in deltas
+                }],
+                metadata={
+                    "block_start": True,
+                    "content_block_index": msg.get("index"),
+                },
+                timestamp=msg.get("timestamp"),
+            )
+        
+        return None
+    
+    def _parse_content_block_stop(self, msg: Dict) -> StreamUpdate:
+        """Parse content block stop event."""
+        return StreamUpdate(
+            type="progress",
+            metadata={
+                "block_stop": True,
+                "content_block_index": msg.get("index"),
+            },
+            timestamp=msg.get("timestamp"),
         )
 
     async def kill_all_processes(self) -> None:

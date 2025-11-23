@@ -101,7 +101,7 @@ class ClaudeCodeBot:
 
     def _register_handlers(self) -> None:
         """Register all command and message handlers."""
-        from .handlers import callback, command, message
+        from .handlers import callback, command, message, topic_creation
 
         # Command handlers
         handlers = [
@@ -117,6 +117,7 @@ class ClaudeCodeBot:
             ("status", command.session_status),
             ("export", command.export_session),
             ("actions", command.quick_actions),
+            ("commands", command.list_custom_commands),
             ("git", command.git_command),
         ]
 
@@ -143,6 +144,9 @@ class ClaudeCodeBot:
             MessageHandler(filters.PHOTO, self._inject_deps(message.handle_photo)),
             group=10,
         )
+
+        # Topic creation handler
+        self.app.add_handler(topic_creation.CreateTopicHandler.get_handler())
 
         # Callback query handler
         self.app.add_handler(

@@ -37,6 +37,7 @@ async def handle_callback_query(
             "action": handle_action_callback,
             "confirm": handle_confirm_callback,
             "quick": handle_quick_action_callback,
+            "custom_cmd": handle_custom_command_callback,
             "followup": handle_followup_callback,
             "conversation": handle_conversation_callback,
             "git": handle_git_callback,
@@ -175,6 +176,7 @@ async def handle_action_callback(
         "help": _handle_help_action,
         "show_projects": _handle_show_projects_action,
         "new_session": _handle_new_session_action,
+        "new_session_start": _handle_new_session_start_action,
         "continue": _handle_continue_action,
         "end_session": _handle_end_session_action,
         "status": _handle_status_action,
@@ -303,10 +305,55 @@ async def _handle_show_projects_action(
 
 
 async def _handle_new_session_action(query, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle new session action."""
+    """Handle new session action (show menu)."""
+    settings: Settings = context.bot_data["settings"]
+    
+    # Use ContextManager if available, otherwise fallback to user_data (for backward compatibility)
+    # But since we are in callback.py, we should import ContextManager or use it if imported
+    # To avoid circular imports or complex refactoring now, we'll stick to the pattern used in command.py
+    # Wait, command.py uses ContextManager. Let's try to use it here too if possible, 
+    # but first let's check imports. 
+    # Actually, let's just use the same logic as before but with the new menu.
+    
+    current_dir = context.user_data.get(
+        "current_directory", settings.approved_directory
+    )
+    relative_path = current_dir.relative_to(settings.approved_directory)
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "📝 Start Here", callback_data="action:new_session_start"
+            ),
+            InlineKeyboardButton(
+                "✨ Create Topic", callback_data="action:create_topic"
+            ),
+        ],
+        [
+            InlineKeyboardButton("❓ Help", callback_data="action:help"),
+        ],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(
+        f"🆕 **New Claude Code Session**\n\n"
+        f"📂 Working directory: `{relative_path}/`\n\n"
+        f"How would you like to start?",
+        parse_mode="Markdown",
+        reply_markup=reply_markup,
+    )
+
+
+async def _handle_new_session_start_action(
+    query, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle start of new session (reset state)."""
     settings: Settings = context.bot_data["settings"]
 
     # Clear session
+    # Note: Ideally we should use ContextManager here, but for now we use direct access 
+    # to match existing callback.py style. 
+    # TODO: Refactor callback.py to use ContextManager fully.
     context.user_data["claude_session_id"] = None
     context.user_data["session_started"] = True
 
@@ -1151,3 +1198,87 @@ def _format_file_size(size: int) -> str:
             return f"{size:.1f}{unit}" if unit != "B" else f"{size}B"
         size /= 1024
     return f"{size:.1f}TB"
+
+
+async def handle_custom_command_callback(
+    query, command_name: str, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle custom command execution from inline keyboard.
+    
+    Args:
+        query: Callback query
+        command_name: Name of the custom command to execute
+        context: Bot context
+    """
+    from pathlib import Path
+    from ..context_manager import ContextManager
+    from ..features.custom_commands import get_command_by_name
+    
+    user_id = query.from_user.id
+    chat_id = query.message.chat_id
+    message_thread_id = query.message.message_thread_id
+    
+    try:
+        # Get working directory from context
+        context_mgr = ContextManager()
+        working_directory = context_mgr.get_current_directory(
+            context, chat_id, message_thread_id
+        )
+        
+        if not working_directory:
+            settings: Settings = context.bot_data["settings"]
+            working_directory = settings.approved_directory
+        
+        # Load command
+        command = get_command_by_name(command_name, working_directory)
+        
+        if not command:
+            await query.edit_message_text(
+                f"❌ **Command Not Found**\\n\\n"
+                f"Custom command `{command_name}` could not be found."
+            )
+            return
+        
+        # Send command prompt to Claude
+        await query.edit_message_text(
+            f"⚡ **Executing: {command.name}**\\n\\n"
+            f"{command.description}\\n\\n"
+            f"Processing..."
+        )
+        
+        # Import ClaudeIntegration
+        claude_integration: ClaudeIntegration = context.bot_data["claude_integration"]
+        
+        # Execute command using the existing message handler infrastructure
+        # by simulating a text message with the command's prompt
+        from telegram import Message
+        
+        # Create a mock update with the command prompt
+        mock_message = query.message
+        mock_message.text = command.prompt
+        
+        # Import and call the message handler
+        from .message import handle_text_message
+        
+        # Create new update object with the mock message
+        from telegram import Update
+        mock_update = Update(
+            update_id=query.message.message_id,
+            message=mock_message,
+        )
+        
+        # Execute command through normal message handler
+        await handle_text_message(mock_update, context)
+        
+    except Exception as e:
+        logger.error(
+            "Failed to execute custom command",
+            error=str(e),
+            user_id=user_id,
+            command_name=command_name,
+        )
+        await query.edit_message_text(
+            f"❌ **Command Execution Failed**\\n\\n"
+            f"Error: {str(e)}"
+        )
+

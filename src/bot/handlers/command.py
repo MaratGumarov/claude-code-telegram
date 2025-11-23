@@ -8,6 +8,7 @@ from ...claude.facade import ClaudeIntegration
 from ...config.settings import Settings
 from ...security.audit import AuditLogger
 from ...security.validators import SecurityValidator
+from ..context_manager import ContextManager
 
 logger = structlog.get_logger()
 
@@ -113,28 +114,20 @@ async def new_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # This will be enhanced when we implement proper session management
 
     # Get current directory (default to approved directory)
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
-    )
+    current_dir = ContextManager.get_current_directory(update, context, settings)
     relative_path = current_dir.relative_to(settings.approved_directory)
 
-    # Clear any existing session data
-    context.user_data["claude_session_id"] = None
-    context.user_data["session_started"] = True
-
+    # Show options for new session
     keyboard = [
         [
             InlineKeyboardButton(
-                "📝 Start Coding", callback_data="action:start_coding"
+                "📝 Start Here", callback_data="action:new_session_start"
             ),
             InlineKeyboardButton(
-                "📁 Change Project", callback_data="action:show_projects"
+                "✨ Create Topic", callback_data="action:create_topic"
             ),
         ],
         [
-            InlineKeyboardButton(
-                "📋 Quick Actions", callback_data="action:quick_actions"
-            ),
             InlineKeyboardButton("❓ Help", callback_data="action:help"),
         ],
     ]
@@ -143,7 +136,7 @@ async def new_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(
         f"🆕 **New Claude Code Session**\n\n"
         f"📂 Working directory: `{relative_path}/`\n\n"
-        f"Ready to help you code! Send me a message to get started, or use the buttons below:",
+        f"How would you like to start?",
         parse_mode="Markdown",
         reply_markup=reply_markup,
     )
@@ -159,9 +152,7 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     # Parse optional prompt from command arguments
     prompt = " ".join(context.args) if context.args else None
 
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
-    )
+    current_dir = ContextManager.get_current_directory(update, context, settings)
 
     try:
         if not claude_integration:
@@ -171,8 +162,8 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
             return
 
-        # Check if there's an existing session in user context
-        claude_session_id = context.user_data.get("claude_session_id")
+        # Check if there's an existing session in context
+        claude_session_id = ContextManager.get_session_id(update, context)
 
         if claude_session_id:
             # We have a session in context, continue it directly
@@ -207,7 +198,7 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         if claude_response:
             # Update session ID in context
-            context.user_data["claude_session_id"] = claude_response.session_id
+            ContextManager.set_session_id(update, context, claude_response.session_id)
 
             # Delete status message and send response
             await status_msg.delete()
@@ -299,9 +290,7 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     audit_logger: AuditLogger = context.bot_data.get("audit_logger")
 
     # Get current directory
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
-    )
+    current_dir = ContextManager.get_current_directory(update, context, settings)
 
     try:
         # List directory contents
@@ -407,9 +396,7 @@ async def change_directory(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     target_path = " ".join(context.args)
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
-    )
+    current_dir = ContextManager.get_current_directory(update, context, settings)
 
     try:
         # Validate path using security validator
@@ -455,11 +442,11 @@ async def change_directory(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
             return
 
-        # Update current directory in user data
-        context.user_data["current_directory"] = resolved_path
+        # Update current directory in context
+        ContextManager.set_current_directory(update, context, resolved_path)
 
         # Clear Claude session on directory change
-        context.user_data["claude_session_id"] = None
+        ContextManager.set_session_id(update, context, None)
 
         # Send confirmation
         relative_path = resolved_path.relative_to(settings.approved_directory)
@@ -490,9 +477,7 @@ async def print_working_directory(
 ) -> None:
     """Handle /pwd command."""
     settings: Settings = context.bot_data["settings"]
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
-    )
+    current_dir = ContextManager.get_current_directory(update, context, settings)
 
     relative_path = current_dir.relative_to(settings.approved_directory)
     absolute_path = str(current_dir)
@@ -581,10 +566,8 @@ async def session_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     settings: Settings = context.bot_data["settings"]
 
     # Get session info
-    claude_session_id = context.user_data.get("claude_session_id")
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
-    )
+    claude_session_id = ContextManager.get_session_id(update, context)
+    current_dir = ContextManager.get_current_directory(update, context, settings)
     relative_path = current_dir.relative_to(settings.approved_directory)
 
     # Get rate limiter info if available
@@ -670,7 +653,7 @@ async def export_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     # Get current session
-    claude_session_id = context.user_data.get("claude_session_id")
+    claude_session_id = ContextManager.get_session_id(update, context)
 
     if not claude_session_id:
         await update.message.reply_text(
@@ -711,7 +694,7 @@ async def end_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     settings: Settings = context.bot_data["settings"]
 
     # Check if there's an active session
-    claude_session_id = context.user_data.get("claude_session_id")
+    claude_session_id = ContextManager.get_session_id(update, context)
 
     if not claude_session_id:
         await update.message.reply_text(
@@ -725,15 +708,13 @@ async def end_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     # Get current directory for display
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
-    )
+    current_dir = ContextManager.get_current_directory(update, context, settings)
     relative_path = current_dir.relative_to(settings.approved_directory)
 
     # Clear session data
-    context.user_data["claude_session_id"] = None
-    context.user_data["session_started"] = False
-    context.user_data["last_message"] = None
+    ContextManager.set_session_id(update, context, None)
+    ContextManager.set_session_started(update, context, False)
+    # context.user_data["last_message"] = None  # This might be user-specific still? Let's keep it commented or remove if unused
 
     # Create quick action buttons
     keyboard = [
@@ -798,7 +779,8 @@ async def quick_actions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         # Get context-aware actions
         actions = await quick_action_manager.get_suggestions(
-            session_data={"working_directory": str(current_dir), "user_id": user_id}
+            session_data={"working_directory": str(current_dir), "user_id": user_id},
+            working_directory=current_dir,
         )
 
         if not actions:
@@ -813,7 +795,7 @@ async def quick_actions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
 
         # Create inline keyboard
-        keyboard = quick_action_manager.create_inline_keyboard(actions, max_columns=2)
+        keyboard = quick_action_manager.create_inline_keyboard(actions, columns=2)
 
         relative_path = current_dir.relative_to(settings.approved_directory)
         await update.message.reply_text(
@@ -827,6 +809,79 @@ async def quick_actions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     except Exception as e:
         await update.message.reply_text(f"❌ **Error Loading Actions**\n\n{str(e)}")
         logger.error("Error in quick_actions command", error=str(e), user_id=user_id)
+
+
+async def list_custom_commands(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle /commands command to list available custom commands."""
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    message_thread_id = update.effective_message.message_thread_id
+    
+    try:
+        # Get working directory
+        context_mgr = ContextManager()
+        working_directory = context_mgr.get_current_directory(
+            context, chat_id, message_thread_id
+        )
+        
+        if not working_directory:
+            settings: Settings = context.bot_data["settings"]
+            working_directory = settings.approved_directory
+        
+        # Scan commands
+        from ..features.custom_commands import scan_commands
+        commands = scan_commands(working_directory)
+        
+        if not commands:
+            await update.message.reply_text(
+                "📋 **Custom Commands**\\n\\n"
+                "No custom commands found.\\n\\n"
+                "**To create a command:**\\n"
+                "1. Create `.claude/commands/` directory\\n"
+                "2. Add `mycommand.json` file:\\n"
+                "```json\\n"
+                "{\\n"
+                '  "description": "Command description",\\n'
+                '  "prompt": "Prompt to send to Claude"\\n'
+                "}\\n"
+                "```\\n"
+                "3. Use `/actions` to see it appear",
+                parse_mode="Markdown",
+            )
+            return
+        
+        # Group by source
+        global_cmds = [c for c in commands if c.source == "global"]
+        project_cmds = [c for c in commands if c.source == "project"]
+        
+        message = "📋 **Custom Commands**\\n\\n"
+        
+        if project_cmds:
+            message += "**Project Commands:**\\n"
+            for cmd in project_cmds:
+                message += f"⚡ `/{cmd.name}` — {cmd.description}\\n"
+            message += "\\n"
+        
+        if global_cmds:
+            message += "**Global Commands:**\\n"
+            for cmd in global_cmds:
+                message += f"⚡ `/{cmd.name}` — {cmd.description}\\n"
+            message += "\\n"
+        
+        message += (
+            f"**Total:** {len(commands)} command(s)\\n\\n"
+            "💡 Use `/actions` to execute these commands via Quick Actions."
+        )
+        
+        await update.message.reply_text(message, parse_mode="Markdown")
+        
+    except Exception as e:
+        logger.error("Error listing custom commands", error=str(e), user_id=user_id)
+        await update.message.reply_text(
+            f"❌ **Error**\\n\\nFailed to list commands: {str(e)}"
+        )
 
 
 async def git_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -906,6 +961,9 @@ async def git_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             [
                 InlineKeyboardButton("🔄 Refresh", callback_data="git:status"),
                 InlineKeyboardButton("📁 Files", callback_data="action:ls"),
+            ],
+            [
+                InlineKeyboardButton("✨ Create Topic", callback_data="action:create_topic"),
             ],
         ]
 
