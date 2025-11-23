@@ -13,6 +13,34 @@ from ..context_manager import ContextManager
 logger = structlog.get_logger()
 
 
+async def _update_pinned_status(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, settings: Settings
+) -> None:
+    """Helper to update pinned status message."""
+    try:
+        from ..features.status_pin import PinnedMessageManager
+        
+        features = context.bot_data.get("features")
+        git_integration = features.get_git_integration() if features else None
+        
+        pinned_manager = PinnedMessageManager(git_integration=git_integration)
+        context_key = ContextManager.get_context_key(update)
+        current_dir = ContextManager.get_current_directory(update, context, settings)
+        current_status = ContextManager.get_current_status(update, context)
+        
+        await pinned_manager.update_status(
+            chat=update.effective_chat,
+            context=context,
+            context_key=context_key,
+            current_path=current_dir,
+            settings=settings,
+            status=current_status,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to update pinned status: {e}")
+
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start command."""
     user = update.effective_user
@@ -457,6 +485,9 @@ async def change_directory(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             parse_mode="Markdown",
         )
 
+        # Update pinned status to reflect new directory
+        await _update_pinned_status(update, context, settings)
+
         # Log successful command
         if audit_logger:
             await audit_logger.log_command(user_id, "cd", [target_path], True)
@@ -745,6 +776,9 @@ async def end_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         parse_mode="Markdown",
         reply_markup=reply_markup,
     )
+
+    # Update pinned status to reflect ended session
+    await _update_pinned_status(update, context, settings)
 
     logger.info("Session ended by user", user_id=user_id, session_id=claude_session_id)
 

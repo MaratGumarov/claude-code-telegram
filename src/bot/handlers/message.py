@@ -177,6 +177,28 @@ async def handle_text_message(
         # Get current directory
         current_dir = ContextManager.get_current_directory(update, context, settings)
 
+        # Update pinned status message (initial - ready state)
+        try:
+            features = context.bot_data.get("features")
+            git_integration = features.get_git_integration() if features else None
+            
+            from ..features.status_pin import PinnedMessageManager
+            pinned_manager = PinnedMessageManager(git_integration=git_integration)
+            
+            # Update to processing status
+            ContextManager.set_current_status(update, context, "processing")
+            context_key = ContextManager.get_context_key(update)
+            await pinned_manager.update_status(
+                chat=update.effective_chat,
+                context=context,
+                context_key=context_key,
+                current_path=current_dir,
+                settings=settings,
+                status="processing",
+            )
+        except Exception as e:
+            logger.warning(f"Failed to update pinned status: {e}")
+
         # Get existing session ID
         session_id = ContextManager.get_session_id(update, context)
 
@@ -442,6 +464,21 @@ async def handle_text_message(
                 except Exception as e:
                     logger.warning("Failed to log interaction to storage", error=str(e))
 
+            # Update pinned status to ready
+            try:
+                ContextManager.set_current_status(update, context, "ready")
+                context_key = ContextManager.get_context_key(update)
+                await pinned_manager.update_status(
+                    chat=update.effective_chat,
+                    context=context,
+                    context_key=context_key,
+                    current_path=current_dir,
+                    settings=settings,
+                    status="ready",
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update pinned status to ready: {e}")
+
         except ClaudeToolValidationError as e:
             # Tool validation error with detailed instructions
             logger.error(
@@ -458,6 +495,21 @@ async def handle_text_message(
             # Generic error
             logger.error("Error running Claude command", error=str(e), user_id=user_id)
             from ..utils.formatting import FormattedMessage
+            
+            # Update pinned status to error
+            try:
+                ContextManager.set_current_status(update, context, "error")
+                context_key = ContextManager.get_context_key(update)
+                await pinned_manager.update_status(
+                    chat=update.effective_chat,
+                    context=context,
+                    context_key=context_key,
+                    current_path=current_dir,
+                    settings=settings,
+                    status="error",
+                )
+            except Exception as pin_error:
+                logger.warning(f"Failed to update pinned status to error: {pin_error}")
             
             formatted_messages = [
                 FormattedMessage(

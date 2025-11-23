@@ -261,6 +261,97 @@ class GitIntegration:
 
         return "\n".join(lines)
 
+    async def get_diff_stats(
+        self, repo_path: Path
+    ) -> Tuple[int, int, int]:
+        """Get diff statistics (lines added/deleted, files changed).
+
+        Args:
+            repo_path: Repository path
+
+        Returns:
+            Tuple of (added_lines, deleted_lines, changed_files)
+        """
+        try:
+            # Get diff with numstat
+            diff_out, _ = await self.execute_git_command(
+                ["git", "diff", "--numstat"], repo_path
+            )
+
+            if not diff_out.strip():
+                return 0, 0, 0
+
+            added_total = 0
+            deleted_total = 0
+            changed_files = 0
+
+            for line in diff_out.strip().split("\n"):
+                if not line:
+                    continue
+
+                parts = line.split("\t")
+                if len(parts) >= 2:
+                    try:
+                        # Parse added and deleted counts
+                        added = int(parts[0]) if parts[0] != "-" else 0
+                        deleted = int(parts[1]) if parts[1] != "-" else 0
+                        added_total += added
+                        deleted_total += deleted
+                        changed_files += 1
+                    except ValueError:
+                        # Binary file or unparseable, skip
+                        continue
+
+            return added_total, deleted_total, changed_files
+
+        except GitError:
+            # No diff or error
+            return 0, 0, 0
+
+
+    async def get_changed_files(
+        self, repo_path: Path
+    ) -> List[Tuple[str, int, int]]:
+        """Get list of changed files with their diff stats.
+
+        Args:
+            repo_path: Repository path
+
+        Returns:
+            List of tuples (filename, added_lines, deleted_lines)
+        """
+        try:
+            # Get diff with numstat
+            diff_out, _ = await self.execute_git_command(
+                ["git", "diff", "--numstat"], repo_path
+            )
+
+            if not diff_out.strip():
+                return []
+
+            files = []
+            for line in diff_out.strip().split("\n"):
+                if not line:
+                    continue
+
+                parts = line.split("\t")
+                if len(parts) >= 3:
+                    try:
+                        # Parse added and deleted counts
+                        added = int(parts[0]) if parts[0] != "-" else 0
+                        deleted = int(parts[1]) if parts[1] != "-" else 0
+                        filename = parts[2]
+                        files.append((filename, added, deleted))
+                    except ValueError:
+                        # Binary file or unparseable, skip
+                        continue
+
+            return files
+
+        except GitError:
+            return []
+
+
     async def get_file_history(
         self, repo_path: Path, file_path: str, limit: int = 10
     ) -> List[CommitInfo]:

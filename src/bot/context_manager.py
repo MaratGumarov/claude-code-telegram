@@ -90,3 +90,48 @@ class ContextManager:
         key = cls.get_context_key(update)
         state = cls.get_state(context, key)
         state["session_started"] = started
+
+    @classmethod
+    def get_pinned_message_id(
+        cls, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> Optional[int]:
+        """Get pinned status message ID for the current topic."""
+        key = cls.get_context_key(update)
+        state = cls.get_state(context, key)
+        return state.get("pinned_message_id")
+
+    @classmethod
+    def set_pinned_message_id(
+        cls, update: Update, context: ContextTypes.DEFAULT_TYPE, message_id: Optional[int]
+    ) -> None:
+        """Set pinned status message ID for the current topic."""
+        key = cls.get_context_key(update)
+        state = cls.get_state(context, key)
+        state["pinned_message_id"] = message_id
+
+    @classmethod
+    def get_current_status(
+        cls, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> str:
+        """Get current processing status for the current topic.
+        
+        Returns:
+            One of: "ready", "processing", "error"
+        """
+        key = cls.get_context_key(update)
+        state = cls.get_state(context, key)
+        return state.get("current_status", "ready")
+
+    @classmethod
+    def set_current_status(
+        cls, update: Update, context: ContextTypes.DEFAULT_TYPE, status: str
+    ) -> None:
+        """Set current processing status for the current topic.
+        
+        Args:
+            status: One of "ready", "processing", "error"
+        """
+        key = cls.get_context_key(update)
+        state = cls.get_state(context, key)
+        state["current_status"] = status
+
