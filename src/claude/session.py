@@ -17,12 +17,7 @@ import structlog
 
 from ..config.settings import Settings
 
-if TYPE_CHECKING:
-    from .integration import ClaudeResponse as CLIClaudeResponse
-    from .sdk_integration import ClaudeResponse as SDKClaudeResponse
-
-# Union type for both CLI and SDK responses
-ClaudeResponse = Union["CLIClaudeResponse", "SDKClaudeResponse"]
+from .types import ClaudeResponse
 
 logger = structlog.get_logger()
 

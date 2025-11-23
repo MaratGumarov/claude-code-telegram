@@ -124,7 +124,7 @@ class ToolMonitor:
                 "netcat",
                 ">",
                 ">>",
-                "|",
+                # "|",  # Removed - too restrictive, Claude Code uses pipes frequently
                 "&",
                 ";",
                 "$(",
@@ -132,7 +132,7 @@ class ToolMonitor:
             ]
 
             for pattern in dangerous_patterns:
-                if pattern in command.lower():
+                if pattern in command:
                     violation = {
                         "type": "dangerous_command",
                         "tool_name": tool_name,

@@ -8,6 +8,8 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from ...claude.exceptions import ClaudeToolValidationError
+from ...claude import ClaudeIntegration
+from ...claude.types import StreamUpdate
 from ...config.settings import Settings
 from ...security.audit import AuditLogger
 from ...security.rate_limiter import RateLimiter
@@ -181,68 +183,220 @@ async def handle_text_message(
         # Enhanced stream updates handler with progress tracking and text streaming
         import time
         
-        # State for streaming
+        # Stream handler for real-time updates
         stream_state = {
             "last_update_time": 0,
-            "accumulated_text": "",
-            "current_message": None,  # The message we are currently appending text to
-            "last_typing_time": 0
+            "current_message": None,
+            "last_typing_time": 0,
+            "events": [],  # Chronological list of {type: "tool"|"text", ...}
+            "update_lock": asyncio.Lock(),
         }
-        
-        async def stream_handler(update_obj):
-            try:
-                current_time = time.time()
-                
-                # Keep typing status active (every 4 seconds)
-                if current_time - stream_state["last_typing_time"] >= 4.0:
-                    await update.message.chat.send_action("typing")
-                    stream_state["last_typing_time"] = current_time
 
+        async def stream_handler(update_obj: StreamUpdate):
+            nonlocal stream_state
+            try:
+                current_time = asyncio.get_event_loop().time()
+                
+                # Log all events for debugging
+                logger.debug("Stream event", type=update_obj.type, has_content=bool(update_obj.content), has_tools=bool(update_obj.tool_calls))
+                
                 # Handle different update types
                 if update_obj.type == "assistant" and update_obj.tool_calls:
-                    # Tool call started - Send a NEW message
-                    tool_names = update_obj.get_tool_names()
-                    if tool_names:
-                        tool_name = tool_names[0]
-                        await update.message.reply_text(
-                            f"🛠️ Using tool: `{tool_name}`...",
-                            parse_mode="Markdown"
-                        )
-                        # Reset current text message so next text starts a new block
-                        stream_state["current_message"] = None
-                        stream_state["accumulated_text"] = ""
+                    # Tool call - add to events with input data
+                    for tool_call in update_obj.tool_calls:
+                        logger.info("Tool call received", name=tool_call.get("name"), input=tool_call.get("input"))
+                        stream_state["events"].append({
+                            "type": "tool",
+                            "name": tool_call.get("name"),
+                            "input": tool_call.get("input", {}),
+                            "id": tool_call.get("id"),
+                            "status": "running"
+                        })
+                    
+                    await _update_stream_message()
+                
+                elif update_obj.type == "tool_result" and update_obj.tool_calls:
+                    # Tool finished - update status
+                    for result in update_obj.tool_calls:
+                        tool_id = result.get("tool_use_id")
+                        for event in stream_state["events"]:
+                            if event["type"] == "tool" and event.get("id") == tool_id:
+                                event["status"] = "done"
+                                break
+                    
+                    await _update_stream_message()
+
+                elif update_obj.type == "result":
+                    # Mark ALL running tools as complete (SDK sends one result after all tools finish)
+                    # This is a fallback in case we missed individual updates
+                    for event in stream_state["events"]:
+                        if event["type"] == "tool" and event["status"] == "running":
+                            event["status"] = "done"
+                    
+                    await _update_stream_message()
                         
                 elif update_obj.type == "assistant" and update_obj.content:
-                    # Text content
+                    # Text content - append to last text event or create new one
                     new_content = update_obj.content
-                    stream_state["accumulated_text"] += new_content
                     
-                    # Throttling for text updates
-                    if (current_time - stream_state["last_update_time"] >= 0.5) or len(new_content) > 50:
-                        text_to_show = stream_state["accumulated_text"]
-                        if len(text_to_show) > 4000:
-                            text_to_show = text_to_show[-4000:] # Keep last 4000 chars if too long
-                            
-                        if stream_state["current_message"]:
-                            # Edit existing message
-                            try:
-                                await stream_state["current_message"].edit_text(
-                                    text_to_show, parse_mode="Markdown"
-                                )
-                            except Exception:
-                                # If edit fails (e.g. same content), ignore
-                                pass
-                        else:
-                            # Send new message
-                            if text_to_show.strip():
-                                stream_state["current_message"] = await update.message.reply_text(
-                                    text_to_show, parse_mode="Markdown"
-                                )
-                        
+                    # Text update - merge with previous if it was text
+                    if stream_state["events"] and stream_state["events"][-1]["type"] == "text":
+                        stream_state["events"][-1]["content"] += update_obj.content
+                    else:
+                        stream_state["events"].append({
+                            "type": "text",
+                            "content": update_obj.content
+                        })
+                    
+                    # Throttling for text updates (0.5s or 50+ chars)
+                    if (current_time - stream_state["last_update_time"] >= 0.5) or len(update_obj.content) > 50:
+                        await _update_stream_message()
                         stream_state["last_update_time"] = current_time
                             
             except Exception as e:
-                logger.warning("Failed to update stream", error=str(e))
+                logger.warning("Failed to update stream", error=str(e), error_type=type(e).__name__)
+                # If it's a Markdown parsing error, try to send without parse_mode
+                if "Can't parse entities" in str(e):
+                    logger.info("Detected Markdown parsing error, retrying without parse_mode")
+                    try:
+                        # Use the last known accumulated text for retry
+                        content_for_retry = stream_state["accumulated_text"]
+                        if not stream_state.get("current_message"):
+                            logger.info("Creating new message without parse_mode")
+                            stream_state["current_message"] = await update.message.reply_text(
+                                content_for_retry,
+                                parse_mode=None,
+                            )
+                        else:
+                            logger.info("Editing existing message without parse_mode", content_preview=content_for_retry[:100])
+                            await stream_state["current_message"].edit_text(
+                                content_for_retry,
+                                parse_mode=None,
+                            )
+                        logger.info("Successfully sent message without parse_mode")
+                    except Exception as retry_error:
+                        logger.error("Failed to update stream even without parse_mode", error=str(retry_error))
+        
+        # Initialize stream state
+        stream_state = {
+            "accumulated_text": "",
+            "events": [],  # List of {type: "tool"|"text", ...}
+            "messages": [], # List of message objects
+            "message_contents": [], # List of content strings corresponding to messages
+            "update_lock": asyncio.Lock(),
+            "update_pending": False
+        }
+        
+        # Tool icons mapping
+        TOOL_ICONS = {
+            "Bash": "💻",
+            "Read": "📄", 
+            "ReadFile": "📄",
+            "Write": "✏️",
+            "WriteFile": "✏️", 
+            "Edit": "📝",
+            "EditFile": "📝",
+            "Glob": "🔍",
+            "LS": "📂",
+            "ls": "📂",
+        }
+
+        async def _update_stream_message():
+            """Helper to update the stream message with current events in chronological order."""
+            nonlocal stream_state
+            
+            # Acquire lock to prevent concurrent updates
+            async with stream_state["update_lock"]:
+                if not stream_state["events"]:
+                    return  # Nothing to show yet
+                
+                # Build message from events in chronological order
+                message_parts = []
+                tool_counter = 0
+                has_separator = False
+                
+                for event in stream_state["events"]:
+                    if event["type"] == "tool":
+                        tool_counter += 1
+                        status_icon = "⏳" if event["status"] == "running" else "✓"
+                        
+                        # Format tool with icon and details
+                        tool_name = event["name"]
+                        tool_input = event.get("input", {})
+                        type_icon = TOOL_ICONS.get(tool_name, "🔧")
+                        
+                        details = ""
+                        if tool_name == "Bash" and "command" in tool_input:
+                            cmd = tool_input["command"].strip()
+                            if len(cmd) > 40:
+                                cmd = cmd[:37] + "..."
+                            details = f": `{cmd}`"
+                        elif tool_name in ["Read", "ReadFile", "Write", "WriteFile", "Edit", "EditFile"]:
+                            # Try different keys for path
+                            path = tool_input.get("path") or tool_input.get("file_path") or tool_input.get("file")
+                            if not path and "paths" in tool_input:
+                                paths = tool_input["paths"]
+                                if isinstance(paths, list) and paths:
+                                    path = paths[0] + (f" (+{len(paths)-1})" if len(paths) > 1 else "")
+                            
+                            if path:
+                                details = f": `{path}`"
+                            else:
+                                # Debug: show keys if no path found
+                                logger.warning("No path found in tool input", tool=tool_name, keys=list(tool_input.keys()))
+                                
+                        elif tool_name in ["Glob"]:
+                            pattern = tool_input.get("pattern") or tool_input.get("include")
+                            if pattern:
+                                details = f": `{pattern}`"
+                            
+                        message_parts.append(f"{tool_counter}. {status_icon} {type_icon} **{tool_name}**{details}")
+                        has_separator = False
+                    elif event["type"] == "text":
+                        # Add separator before text if there were tools before and no separator yet
+                        if tool_counter > 0 and not has_separator:
+                            message_parts.append("\n---\n")
+                            has_separator = True
+                        message_parts.append(event["content"])
+                
+                combined_text = "\n".join(message_parts)
+                
+                if not combined_text.strip():
+                    return
+
+                # Split text into chunks (Telegram limit is 4096, use 4000 for safety)
+                CHUNK_SIZE = 4000
+                chunks = [combined_text[i:i+CHUNK_SIZE] for i in range(0, len(combined_text), CHUNK_SIZE)]
+                
+                # Update or send messages for each chunk
+                for i, chunk in enumerate(chunks):
+                    # Check if we have a message for this chunk
+                    if i < len(stream_state["messages"]):
+                        # Only edit if content changed
+                        if i < len(stream_state["message_contents"]) and stream_state["message_contents"][i] == chunk:
+                            continue
+                            
+                        try:
+                            await stream_state["messages"][i].edit_text(
+                                chunk,
+                                parse_mode="Markdown",
+                            )
+                            # Update stored content
+                            if i < len(stream_state["message_contents"]):
+                                stream_state["message_contents"][i] = chunk
+                            else:
+                                stream_state["message_contents"].append(chunk)
+                        except Exception:
+                            pass  # Ignore if same content or other error
+                    else:
+                        # Send new message
+                        msg = await update.message.reply_text(
+                            chunk,
+                            parse_mode="Markdown",
+                        )
+                        stream_state["messages"].append(msg)
+                        stream_state["message_contents"].append(chunk)
+
 
         # Background task to keep typing status active
         async def keep_typing():
@@ -343,21 +497,30 @@ async def handle_text_message(
         should_send = False
         if 'formatted_messages' in locals():
             # Check if it's an error message
-            if any("❌" in msg.text for msg in formatted_messages):
+            if any(icon in msg.text for msg in formatted_messages for icon in ["❌", "🚫"]):
                 should_send = True
-            # Or if we didn't stream any text content
-            elif not stream_state.get("accumulated_text"):
+            # Or if we didn't stream any messages (no messages were sent via streaming)
+            elif not stream_state.get("messages"):
                 should_send = True
 
         if should_send:
             for i, message in enumerate(formatted_messages):
                 try:
-                    await update.message.reply_text(
-                        message.text,
-                        parse_mode=message.parse_mode,
-                        reply_markup=message.reply_markup,
-                        reply_to_message_id=update.message.message_id if i == 0 else None,
-                    )
+                    try:
+                        await update.message.reply_text(
+                            message.text,
+                            parse_mode=message.parse_mode,
+                            reply_markup=message.reply_markup,
+                            reply_to_message_id=update.message.message_id if i == 0 else None,
+                        )
+                    except Exception:
+                        # Fallback if markdown fails
+                        await update.message.reply_text(
+                            message.text,
+                            parse_mode=None,
+                            reply_markup=message.reply_markup,
+                            reply_to_message_id=update.message.message_id if i == 0 else None,
+                        )
 
                     # Small delay between messages to avoid rate limits
                     if i < len(formatted_messages) - 1:
@@ -367,11 +530,19 @@ async def handle_text_message(
                     logger.error(
                         "Failed to send response message", error=str(e), message_index=i
                     )
-                    # Try to send error message
-                    await update.message.reply_text(
-                        "❌ Failed to send response. Please try again.",
-                        reply_to_message_id=update.message.message_id if i == 0 else None,
-                    )
+                    # Try to send error message without parse_mode to avoid formatting issues
+                    try:
+                        await update.message.reply_text(
+                            message.text,
+                            parse_mode=None,  # Disable Markdown parsing
+                            reply_to_message_id=update.message.message_id if i == 0 else None,
+                        )
+                    except Exception as retry_error:
+                        logger.error("Failed to send even without parse_mode", error=str(retry_error))
+                        await update.message.reply_text(
+                            "❌ Failed to send response. Please try again.",
+                            reply_to_message_id=update.message.message_id if i == 0 else None,
+                        )
 
         # Update session info
         # context.user_data["last_message"] = update.message.text  # TODO: Check if needed for topics
@@ -385,22 +556,20 @@ async def handle_text_message(
         if conversation_enhancer and claude_response:
             try:
                 # Update conversation context
-                conversation_context = conversation_enhancer.update_context(
-                    session_id=claude_response.session_id,
+                # Update conversation context
+                conversation_enhancer.update_context(
                     user_id=user_id,
-                    working_directory=str(current_dir),
-                    tools_used=claude_response.tools_used or [],
-                    response_content=claude_response.content,
+                    response=claude_response,
                 )
+                
+                # Get updated context
+                conversation_context = conversation_enhancer.get_or_create_context(user_id)
 
                 # Check if we should show follow-up suggestions
-                if conversation_enhancer.should_show_suggestions(
-                    claude_response.tools_used or [], claude_response.content
-                ):
+                if conversation_enhancer.should_show_suggestions(claude_response):
                     # Generate follow-up suggestions
                     suggestions = conversation_enhancer.generate_follow_up_suggestions(
-                        claude_response.content,
-                        claude_response.tools_used or [],
+                        claude_response,
                         conversation_context,
                     )
 

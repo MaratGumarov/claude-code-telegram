@@ -49,9 +49,6 @@ class Settings(BaseSettings):
     )
 
     # Claude settings
-    claude_binary_path: Optional[str] = Field(
-        None, description="Path to Claude CLI binary (deprecated)"
-    )
     claude_cli_path: Optional[str] = Field(
         None, description="Path to Claude CLI executable"
     )
@@ -71,7 +68,7 @@ class Settings(BaseSettings):
     claude_max_cost_per_user: float = Field(
         DEFAULT_CLAUDE_MAX_COST_PER_USER, description="Max cost per user"
     )
-    use_sdk: bool = Field(True, description="Use Python SDK instead of CLI subprocess")
+    # use_sdk removed as we are now SDK-only
     claude_allowed_tools: Optional[List[str]] = Field(
         default=[
             "Read",

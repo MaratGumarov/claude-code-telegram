@@ -9,11 +9,11 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import structlog
 
 from ..config.settings import Settings
+from .agent import ClaudeAgentClient
 from .exceptions import ClaudeToolValidationError
-from .integration import ClaudeProcessManager, ClaudeResponse, StreamUpdate
 from .monitor import ToolMonitor
-from .sdk_integration import ClaudeSDKManager
 from .session import SessionManager
+from .types import ClaudeResponse, StreamUpdate
 
 logger = structlog.get_logger()
 
@@ -24,29 +24,14 @@ class ClaudeIntegration:
     def __init__(
         self,
         config: Settings,
-        process_manager: Optional[ClaudeProcessManager] = None,
-        sdk_manager: Optional[ClaudeSDKManager] = None,
         session_manager: Optional[SessionManager] = None,
         tool_monitor: Optional[ToolMonitor] = None,
     ):
         """Initialize Claude integration facade."""
         self.config = config
-
-        # Initialize both managers for fallback capability
-        self.sdk_manager = (
-            sdk_manager or ClaudeSDKManager(config) if config.use_sdk else None
-        )
-        self.process_manager = process_manager or ClaudeProcessManager(config)
-
-        # Use SDK by default if configured
-        if config.use_sdk:
-            self.manager = self.sdk_manager
-        else:
-            self.manager = self.process_manager
-
+        self.client = ClaudeAgentClient(config)
         self.session_manager = session_manager
         self.tool_monitor = tool_monitor
-        self._sdk_failed_count = 0  # Track SDK failures for adaptive fallback
 
     async def run_command(
         self,
@@ -74,14 +59,29 @@ class ClaudeIntegration:
         tools_validated = True
         validation_errors = []
         blocked_tools = set()
-
+        
+        # Accumulate response data
+        full_content = []
+        tools_used = []
+        start_time = 0 # TODO: Track time
+        
         async def stream_handler(update: StreamUpdate):
             nonlocal tools_validated
+            
+            # Accumulate content
+            if update.content:
+                if update.type == "assistant":
+                    full_content.append(update.content)
+                elif update.type == "error":
+                    full_content.append(f"Error: {update.content}")
+                    # We'll set is_error=True in the final response construction if we see an error
 
             # Validate tool calls
-            if update.tool_calls:
+            if update.tool_calls and update.type == "assistant":
                 for tool_call in update.tool_calls:
                     tool_name = tool_call["name"]
+                    tools_used.append(tool_call)
+                    
                     valid, error = await self.tool_monitor.validate_tool_call(
                         tool_name,
                         tool_call.get("input", {}),
@@ -107,14 +107,25 @@ class ClaudeIntegration:
                         # For critical tools, we should fail fast
                         if tool_name in ["Task", "Read", "Write", "Edit"]:
                             # Create comprehensive error message
-                            admin_instructions = self._get_admin_instructions(
-                                list(blocked_tools)
-                            )
-                            error_msg = self._create_tool_error_message(
-                                list(blocked_tools),
-                                self.config.claude_allowed_tools or [],
-                                admin_instructions,
-                            )
+                            if blocked_tools:
+                                admin_instructions = self._get_admin_instructions(
+                                    list(blocked_tools)
+                                )
+                                error_msg = self._create_tool_error_message(
+                                    list(blocked_tools),
+                                    self.config.claude_allowed_tools or [],
+                                    admin_instructions,
+                                )
+                            else:
+                                # Generic validation error (e.g. path traversal)
+                                error_msg = (
+                                    f"🚫 **Tool Validation Failed**\n\n"
+                                    f"Operation blocked by security policy.\n\n"
+                                    f"**Reason:** {error}\n\n"
+                                    f"**Details:**\n"
+                                    f"• Tool: `{tool_name}`\n"
+                                    f"• Action: Blocked for security\n"
+                                )
 
                             raise ClaudeToolValidationError(
                                 error_msg,
@@ -132,23 +143,27 @@ class ClaudeIntegration:
         # Execute command
         try:
             # Only continue session if it's not a new session
-            should_continue = bool(session_id) and not getattr(
-                session, "is_new_session", False
-            )
-
-            # For new sessions, don't pass the temporary session_id to Claude Code
-            claude_session_id = (
-                None
-                if getattr(session, "is_new_session", False)
-                else session.session_id
-            )
-
-            response = await self._execute_with_fallback(
-                prompt=prompt,
+            # should_continue = bool(session_id) and not getattr(
+            #     session, "is_new_session", False
+            # )
+            
+            # Execute via agent client
+            async for update in self.client.stream_message(
+                message=prompt,
+                session_id=session.session_id,
                 working_directory=working_directory,
-                session_id=claude_session_id,
-                continue_session=should_continue,
-                stream_callback=stream_handler,
+            ):
+                await stream_handler(update)
+
+            # Construct response
+            response = ClaudeResponse(
+                content="".join(full_content),
+                session_id=session.session_id,
+                cost=0.0, # SDK might not provide cost yet
+                duration_ms=0, # TODO: Calculate duration
+                num_turns=1,
+                is_error=not tools_validated or any(line.startswith("Error:") for line in full_content),
+                tools_used=tools_used,
             )
 
             # Check if tool validation failed
@@ -189,27 +204,12 @@ class ClaudeIntegration:
                         f"Details: {'; '.join(validation_errors)}"
                     )
 
-            # Update session (this may change the session_id for new sessions)
-            old_session_id = session.session_id
+            # Update session
             await self.session_manager.update_session(session.session_id, response)
-
-            # For new sessions, get the updated session_id from the session manager
-            if hasattr(session, "is_new_session") and response.session_id:
-                # The session_id has been updated to Claude's session_id
-                final_session_id = response.session_id
-            else:
-                # Use the original session_id for continuing sessions
-                final_session_id = old_session_id
-
-            # Ensure response has the correct session_id
-            response.session_id = final_session_id
 
             logger.info(
                 "Claude command completed",
                 session_id=response.session_id,
-                cost=response.cost,
-                duration_ms=response.duration_ms,
-                num_turns=response.num_turns,
                 is_error=response.is_error,
             )
 
@@ -223,85 +223,6 @@ class ClaudeIntegration:
                 session_id=session.session_id,
             )
             raise
-
-    async def _execute_with_fallback(
-        self,
-        prompt: str,
-        working_directory: Path,
-        session_id: Optional[str] = None,
-        continue_session: bool = False,
-        stream_callback: Optional[Callable] = None,
-    ) -> ClaudeResponse:
-        """Execute command with SDK->subprocess fallback on JSON decode errors."""
-        # Try SDK first if configured
-        if self.config.use_sdk and self.sdk_manager:
-            try:
-                logger.debug("Attempting Claude SDK execution")
-                response = await self.sdk_manager.execute_command(
-                    prompt=prompt,
-                    working_directory=working_directory,
-                    session_id=session_id,
-                    continue_session=continue_session,
-                    stream_callback=stream_callback,
-                )
-                # Reset failure count on success
-                self._sdk_failed_count = 0
-                return response
-
-            except Exception as e:
-                error_str = str(e)
-                # Check if this is a JSON decode error that indicates SDK issues
-                if (
-                    "Failed to decode JSON" in error_str
-                    or "JSON decode error" in error_str
-                    or "TaskGroup" in error_str
-                    or "ExceptionGroup" in error_str
-                ):
-                    self._sdk_failed_count += 1
-                    logger.warning(
-                        "Claude SDK failed with JSON/TaskGroup error, falling back to subprocess",
-                        error=error_str,
-                        failure_count=self._sdk_failed_count,
-                        error_type=type(e).__name__,
-                    )
-
-                    # Use subprocess fallback
-                    try:
-                        logger.info("Executing with subprocess fallback")
-                        response = await self.process_manager.execute_command(
-                            prompt=prompt,
-                            working_directory=working_directory,
-                            session_id=session_id,
-                            continue_session=continue_session,
-                            stream_callback=stream_callback,
-                        )
-                        logger.info("Subprocess fallback succeeded")
-                        return response
-
-                    except Exception as fallback_error:
-                        logger.error(
-                            "Both SDK and subprocess failed",
-                            sdk_error=error_str,
-                            subprocess_error=str(fallback_error),
-                        )
-                        # Re-raise the original SDK error since it was the primary method
-                        raise e
-                else:
-                    # For non-JSON errors, re-raise immediately
-                    logger.error(
-                        "Claude SDK failed with non-JSON error", error=error_str
-                    )
-                    raise
-        else:
-            # Use subprocess directly if SDK not configured
-            logger.debug("Using subprocess execution (SDK disabled)")
-            return await self.process_manager.execute_command(
-                prompt=prompt,
-                working_directory=working_directory,
-                session_id=session_id,
-                continue_session=continue_session,
-                stream_callback=stream_callback,
-            )
 
     async def continue_session(
         self,
@@ -388,10 +309,8 @@ class ClaudeIntegration:
     async def shutdown(self) -> None:
         """Shutdown integration and cleanup resources."""
         logger.info("Shutting down Claude integration")
-
-        # Kill any active processes
-        await self.manager.kill_all_processes()
-
+        # No specific cleanup needed for SDK client yet
+        
         # Clean up expired sessions
         await self.cleanup_expired_sessions()
 
