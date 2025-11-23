@@ -7,8 +7,8 @@ from .exceptions import (
     ClaudeSessionError,
     ClaudeTimeoutError,
 )
+from .agent import ClaudeAgentClient
 from .facade import ClaudeIntegration
-from .integration import ClaudeProcessManager, ClaudeResponse, StreamUpdate
 from .monitor import ToolMonitor
 from .parser import OutputParser, ResponseFormatter
 from .session import (
@@ -17,6 +17,7 @@ from .session import (
     SessionManager,
     SessionStorage,
 )
+from .types import ClaudeResponse, StreamUpdate
 
 __all__ = [
     # Exceptions
@@ -27,8 +28,8 @@ __all__ = [
     "ClaudeTimeoutError",
     # Main integration
     "ClaudeIntegration",
+    "ClaudeAgentClient",
     # Core components
-    "ClaudeProcessManager",
     "ClaudeResponse",
     "StreamUpdate",
     "SessionManager",

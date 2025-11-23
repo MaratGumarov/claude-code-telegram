@@ -14,11 +14,9 @@ from src import __version__
 from src.bot.core import ClaudeCodeBot
 from src.claude import (
     ClaudeIntegration,
-    ClaudeProcessManager,
     SessionManager,
     ToolMonitor,
 )
-from src.claude.sdk_integration import ClaudeSDKManager
 from src.config.features import FeatureFlags
 from src.config.loader import load_config
 from src.config.settings import Settings
@@ -132,21 +130,9 @@ async def create_application(config: Settings) -> Dict[str, Any]:
     session_manager = SessionManager(config, session_storage)
     tool_monitor = ToolMonitor(config, security_validator)
 
-    # Create Claude manager based on configuration
-    if config.use_sdk:
-        logger.info("Using Claude Python SDK integration")
-        sdk_manager = ClaudeSDKManager(config)
-        process_manager = None
-    else:
-        logger.info("Using Claude CLI subprocess integration")
-        process_manager = ClaudeProcessManager(config)
-        sdk_manager = None
-
     # Create main Claude integration facade
     claude_integration = ClaudeIntegration(
         config=config,
-        process_manager=process_manager,
-        sdk_manager=sdk_manager,
         session_manager=session_manager,
         tool_monitor=tool_monitor,
     )
