@@ -145,6 +145,14 @@ class Settings(BaseSettings):
     webhook_port: int = Field(8443, description="Webhook port")
     webhook_path: str = Field("/webhook", description="Webhook path")
 
+    # Web App settings
+    webapp_base_url: Optional[str] = Field(
+        None, description="Base URL for Telegram Web App (e.g., from Cloudflare Tunnel)"
+    )
+    diff_viewer_secret: Optional[SecretStr] = Field(
+        None, description="Secret key for diff viewer JWT tokens"
+    )
+
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
     )
@@ -247,5 +255,14 @@ class Settings(BaseSettings):
         return (
             self.anthropic_api_key.get_secret_value()
             if self.anthropic_api_key
+            else None
+        )
+
+    @property
+    def diff_viewer_secret_str(self) -> Optional[str]:
+        """Get diff viewer secret as string."""
+        return (
+            self.diff_viewer_secret.get_secret_value()
+            if self.diff_viewer_secret
             else None
         )

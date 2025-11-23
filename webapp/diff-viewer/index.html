@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Git Diff Viewer</title>
+
+    <!-- Diff2Html CSS -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/diff2html/bundles/css/diff2html.min.css">
+
+    <!-- Telegram Web App SDK -->
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+    <!-- Custom styles -->
+    <link rel="stylesheet" href="/static/diff-viewer/styles.css">
+</head>
+<body>
+    <div id="app">
+        <div id="header">
+            <div id="info">
+                <span id="branch-name"></span>
+                <span id="repo-path"></span>
+            </div>
+        </div>
+
+        <div id="loading" class="loading">
+            <div class="spinner"></div>
+            <p>Loading diff...</p>
+        </div>
+
+        <div id="error" class="error hidden">
+            <div class="error-icon">⚠️</div>
+            <h3>Error Loading Diff</h3>
+            <p id="error-message"></p>
+        </div>
+
+        <div id="diff-container"></div>
+    </div>
+
+    <!-- Diff2Html JS -->
+    <script src="https://cdn.jsdelivr.net/npm/diff2html/bundles/js/diff2html-ui.min.js"></script>
+
+    <!-- App JS -->
+    <script src="/static/diff-viewer/app.js"></script>
+</body>
+</html>

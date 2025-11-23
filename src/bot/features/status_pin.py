@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 from typing import Optional, Tuple
 
-from telegram import Chat, Message
+from telegram import Chat, Message, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
@@ -212,6 +212,49 @@ class PinnedMessageManager:
         self.git_integration = git_integration
         self._update_lock = asyncio.Lock()
 
+    def _create_inline_keyboard(
+        self, current_path: Path, settings: Settings
+    ) -> Optional[InlineKeyboardMarkup]:
+        """Create inline keyboard with Web App button.
+
+        Args:
+            current_path: Current working directory
+            settings: Bot settings
+
+        Returns:
+            InlineKeyboardMarkup if configured, None otherwise
+        """
+        # Only add buttons if webapp is configured
+        if not settings.webapp_base_url or not settings.diff_viewer_secret_str:
+            return None
+
+        try:
+            # Import here to avoid circular dependency
+            from src.api.diff_viewer import generate_diff_token
+
+            # Generate secure token for this diff
+            token = generate_diff_token(
+                current_path, settings.diff_viewer_secret_str, expiry_hours=1
+            )
+
+            # Build Web App URL
+            webapp_url = f"{settings.webapp_base_url}/diff-viewer/?token={token}"
+
+            # Create keyboard with View Diff button
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "👁️ View Diff", web_app=WebAppInfo(url=webapp_url)
+                    )
+                ]
+            ]
+
+            return InlineKeyboardMarkup(keyboard)
+
+        except Exception as e:
+            logger.warning(f"Failed to create inline keyboard: {e}")
+            return None
+
     async def update_status(
         self,
         chat: Chat,
@@ -252,9 +295,18 @@ class PinnedMessageManager:
                     approved_directory=settings.approved_directory,
                     changed_files=changed_files,
                 )
-                
+
+                # Telegram message limit is 4096 characters
+                # Truncate if too long
+                if len(status_text) > 4000:
+                    lines = status_text.split('\n')
+                    status_text = '\n'.join(lines[:15]) + '\n... (message truncated)'
+                    logger.warning(f"Status message truncated (was {len(status_text)} chars)")
+
                 logger.info(f"Formatted status: '{status_text[:100]}...' (branch={branch}, +{added}/-{deleted}, {len(changed_files) if changed_files else 0} files, path={current_path})")
 
+                # Create inline keyboard with Web App button
+                reply_markup = self._create_inline_keyboard(current_path, settings)
 
                 # Get state
                 if "topic_states" not in context.chat_data:
@@ -272,17 +324,25 @@ class PinnedMessageManager:
                         await context.bot.edit_message_text(
                             chat_id=chat.id,
                             message_id=pinned_msg_id,
-                            text=status_text
+                            text=status_text,
+                            reply_markup=reply_markup,
                         )
-                        logger.debug(f"Updated pinned status: {status_text}")
+                        logger.debug(f"Updated pinned status: {status_text[:50]}...")
                         return None  # We don't have the message object, but update succeeded
                     except TelegramError as e:
-                        logger.debug(f"Failed to update pinned message: {e}")
+                        logger.warning(f"Failed to update pinned message (ID: {pinned_msg_id}): {e}")
                         # Message was deleted or error, create new one
                         pinned_msg_id = None
 
                 # Create new pinned message
-                msg = await chat.send_message(status_text)
+                try:
+                    msg = await chat.send_message(status_text, reply_markup=reply_markup)
+                except TelegramError as e:
+                    logger.error(f"Failed to send status message: {e}")
+                    logger.error(f"Message length: {len(status_text)} chars")
+                    logger.error(f"Has keyboard: {reply_markup is not None}")
+                    # Try without keyboard as fallback
+                    msg = await chat.send_message(status_text[:4000])
 
                 # Pin the message (silently, without notification)
                 try:
