@@ -29,6 +29,11 @@ async def rate_limit_middleware(
         logger.warning("No user information in update")
         return await handler(event, data)
 
+    # Ignore messages from bots (including ourselves)
+    if event.effective_user and getattr(event.effective_user, "is_bot", False):
+        logger.debug("Ignoring bot message in rate limiter", user_id=user_id, username=username)
+        return await handler(event, data)
+
     # Get dependencies from context
     rate_limiter = data.get("rate_limiter")
     audit_logger = data.get("audit_logger")
@@ -91,7 +96,7 @@ def estimate_message_cost(event: Any) -> float:
     - Expected Claude usage
     """
     message = event.effective_message
-    message_text = message.text if message else ""
+    message_text = message.text if (message and message.text) else ""
 
     # Base cost for any message
     base_cost = 0.01
@@ -104,7 +109,7 @@ def estimate_message_cost(event: Any) -> float:
         # File uploads cost more
         return base_cost + length_cost + 0.05
 
-    if message_text.startswith("/"):
+    if message_text and message_text.startswith("/"):
         # Commands cost more
         return base_cost + length_cost + 0.02
 

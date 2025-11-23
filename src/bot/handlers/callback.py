@@ -347,20 +347,47 @@ async def _handle_new_session_action(query, context: ContextTypes.DEFAULT_TYPE) 
 async def _handle_new_session_start_action(
     query, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Handle start of new session (reset state)."""
+    """Handle start of new session (reset state and create new pinned message)."""
+    from ..context_manager import ContextManager
+    from telegram import Update
+
     settings: Settings = context.bot_data["settings"]
 
-    # Clear session
-    # Note: Ideally we should use ContextManager here, but for now we use direct access 
-    # to match existing callback.py style. 
-    # TODO: Refactor callback.py to use ContextManager fully.
-    context.user_data["claude_session_id"] = None
-    context.user_data["session_started"] = True
-
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
+    # Create a mock update to use ContextManager
+    # We need this because query doesn't have the same structure as Update
+    mock_update = Update(
+        update_id=query.message.message_id,
+        message=query.message,
     )
+
+    # Clear session using ContextManager
+    ContextManager.set_session_id(mock_update, context, None)
+    ContextManager.set_session_started(mock_update, context, True)
+
+    current_dir = ContextManager.get_current_directory(mock_update, context, settings)
     relative_path = current_dir.relative_to(settings.approved_directory)
+
+    # Create new pinned status message
+    try:
+        from ..features.status_pin import PinnedMessageManager
+
+        features = context.bot_data.get("features")
+        git_integration = features.get_git_integration() if features else None
+
+        pinned_manager = PinnedMessageManager(git_integration=git_integration)
+        context_key = ContextManager.get_context_key(mock_update)
+
+        await pinned_manager.create_new_pinned_message(
+            chat=query.message.chat,
+            context=context,
+            context_key=context_key,
+            current_path=current_dir,
+            settings=settings,
+            status="ready",
+        )
+        logger.info("Created new pinned message for new session")
+    except Exception as e:
+        logger.warning(f"Failed to create new pinned status: {e}")
 
     keyboard = [
         [

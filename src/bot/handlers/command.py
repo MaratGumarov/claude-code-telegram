@@ -138,36 +138,52 @@ async def new_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     """Handle /new command."""
     settings: Settings = context.bot_data["settings"]
 
-    # For now, we'll use a simple session concept
-    # This will be enhanced when we implement proper session management
-
     # Get current directory (default to approved directory)
     current_dir = ContextManager.get_current_directory(update, context, settings)
     relative_path = current_dir.relative_to(settings.approved_directory)
 
-    # Show options for new session
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "📝 Start Here", callback_data="action:new_session_start"
-            ),
-            InlineKeyboardButton(
-                "✨ Create Topic", callback_data="action:create_topic"
-            ),
-        ],
-        [
-            InlineKeyboardButton("❓ Help", callback_data="action:help"),
-        ],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    # Clear session to start fresh
+    ContextManager.set_session_id(update, context, None)
 
-    await update.message.reply_text(
-        f"🆕 **New Claude Code Session**\n\n"
-        f"📂 Working directory: `{relative_path}/`\n\n"
-        f"How would you like to start?",
-        parse_mode="Markdown",
-        reply_markup=reply_markup,
-    )
+    # Create new pinned status message with session info and buttons
+    try:
+        from ..features.status_pin import PinnedMessageManager
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        features = context.bot_data.get("features")
+        git_integration = features.get_git_integration() if features else None
+
+        pinned_manager = PinnedMessageManager(git_integration=git_integration)
+        context_key = ContextManager.get_context_key(update)
+
+        # Create custom keyboard with session options
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "📝 Start Here", callback_data="action:new_session_start"
+                ),
+                InlineKeyboardButton(
+                    "✨ Create Topic", callback_data="action:create_topic"
+                ),
+            ],
+            [
+                InlineKeyboardButton("❓ Help", callback_data="action:help"),
+            ],
+        ]
+
+        await pinned_manager.create_new_pinned_message(
+            chat=update.effective_chat,
+            context=context,
+            context_key=context_key,
+            current_path=current_dir,
+            settings=settings,
+            status="ready",
+            extra_text=f"\n\n🆕 **New Claude Code Session**\n\nHow would you like to start?",
+            extra_buttons=keyboard,
+        )
+        logger.info("Created new pinned message for /new command")
+    except Exception as e:
+        logger.warning(f"Failed to create new pinned status: {e}")
 
 
 async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

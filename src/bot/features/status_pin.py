@@ -360,6 +360,131 @@ class PinnedMessageManager:
                 logger.error(f"Error updating pinned status: {e}")
                 return None
 
+    async def create_new_pinned_message(
+        self,
+        chat: Chat,
+        context: ContextTypes.DEFAULT_TYPE,
+        context_key: str,
+        current_path: Path,
+        settings: Settings,
+        status: str = "ready",
+        extra_text: str = "",
+        extra_buttons: list = None,
+    ) -> Optional[Message]:
+        """Create a new pinned message, unpinning the old one first.
+
+        This is used when starting a new session to create a fresh pinned message
+        instead of updating the existing one.
+
+        Args:
+            chat: Telegram chat object
+            context: Bot context
+            context_key: Context key for this chat/thread
+            current_path: Current working directory
+            settings: Bot settings
+            status: Current status (ready/processing/error)
+            extra_text: Additional text to append to the status message
+            extra_buttons: Additional button rows to add to the keyboard
+
+        Returns:
+            Pinned message object or None
+        """
+        async with self._update_lock:
+            try:
+                # Get state
+                if "topic_states" not in context.chat_data:
+                    context.chat_data["topic_states"] = {}
+                if context_key not in context.chat_data["topic_states"]:
+                    context.chat_data["topic_states"][context_key] = {}
+
+                state = context.chat_data["topic_states"][context_key]
+                old_pinned_msg_id = state.get("pinned_message_id")
+
+                # Unpin old message if exists
+                if old_pinned_msg_id:
+                    try:
+                        await context.bot.unpin_chat_message(
+                            chat_id=chat.id,
+                            message_id=old_pinned_msg_id
+                        )
+                        logger.info(f"Unpinned old message: {old_pinned_msg_id}")
+                    except TelegramError as e:
+                        logger.warning(f"Failed to unpin old message (ID: {old_pinned_msg_id}): {e}")
+
+                # Clear the old pinned message ID
+                state["pinned_message_id"] = None
+
+                # Get status emoji
+                status_emoji = StatusFormatter.get_status_emoji(status)
+
+                # Get git stats if available
+                branch, added, deleted, changed_files = await self._get_git_stats(current_path)
+
+                # Format compact status
+                status_text = StatusFormatter.format_compact_status(
+                    status_emoji=status_emoji,
+                    branch=branch,
+                    added_lines=added,
+                    deleted_lines=deleted,
+                    current_path=current_path,
+                    approved_directory=settings.approved_directory,
+                    changed_files=changed_files,
+                )
+
+                # Add extra text if provided
+                if extra_text:
+                    status_text += extra_text
+
+                # Telegram message limit is 4096 characters
+                # Truncate if too long
+                if len(status_text) > 4000:
+                    lines = status_text.split('\n')
+                    status_text = '\n'.join(lines[:15]) + '\n... (message truncated)'
+                    logger.warning(f"Status message truncated (was {len(status_text)} chars)")
+
+                logger.info(f"Creating new pinned message: '{status_text[:100]}...' (branch={branch}, +{added}/-{deleted}, {len(changed_files) if changed_files else 0} files, path={current_path})")
+
+                # Create inline keyboard with Web App button
+                keyboard_markup = self._create_inline_keyboard(current_path, settings)
+
+                # Add extra buttons if provided
+                if extra_buttons:
+                    if keyboard_markup:
+                        # Merge keyboards
+                        existing_buttons = keyboard_markup.inline_keyboard
+                        all_buttons = list(existing_buttons) + extra_buttons
+                        reply_markup = InlineKeyboardMarkup(all_buttons)
+                    else:
+                        reply_markup = InlineKeyboardMarkup(extra_buttons)
+                else:
+                    reply_markup = keyboard_markup
+
+                # Create new pinned message
+                try:
+                    msg = await chat.send_message(status_text, reply_markup=reply_markup)
+                except TelegramError as e:
+                    logger.error(f"Failed to send status message: {e}")
+                    logger.error(f"Message length: {len(status_text)} chars")
+                    logger.error(f"Has keyboard: {reply_markup is not None}")
+                    # Try without keyboard as fallback
+                    msg = await chat.send_message(status_text[:4000])
+
+                # Pin the message (silently, without notification)
+                try:
+                    await msg.pin(disable_notification=True)
+                    state["pinned_message_id"] = msg.message_id
+                    logger.info(f"Created and pinned new status message: {status_text}")
+                    return msg
+                except TelegramError as e:
+                    logger.warning(f"Failed to pin message: {e}")
+                    # Keep the message ID anyway, we can update it
+                    state["pinned_message_id"] = msg.message_id
+                    return msg
+
+            except Exception as e:
+                logger.error(f"Error creating new pinned status: {e}")
+                return None
+
     async def _get_git_stats(
         self, repo_path: Path
     ) -> Tuple[Optional[str], Optional[int], Optional[int], Optional[list]]:
@@ -372,7 +497,7 @@ class PinnedMessageManager:
             Tuple of (branch_name, added_lines, deleted_lines, changed_files_list)
         """
         logger.info(f"Checking git stats for path: {repo_path}")
-        
+
         if not self.git_integration:
             logger.info("No git integration available")
             return None, None, None, None
@@ -387,7 +512,7 @@ class PinnedMessageManager:
             # Get diff stats
             added, deleted, _ = await self.git_integration.get_diff_stats(repo_path)
             logger.info(f"Git diff stats: +{added}/-{deleted}")
-            
+
             # Get list of changed files
             changed_files = await self.git_integration.get_changed_files(repo_path)
             logger.info(f"Changed files: {len(changed_files)} files")

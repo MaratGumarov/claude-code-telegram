@@ -299,10 +299,17 @@ class ClaudeCodeBot:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Handle errors globally."""
+        import traceback
         error = context.error
+
+        # Get traceback
+        tb_str = ''.join(traceback.format_exception(type(error), error, error.__traceback__))
+
         logger.error(
             "Global error handler triggered",
             error=str(error),
+            error_type=type(error).__name__,
+            traceback=tb_str,
             update_type=type(update).__name__ if update else None,
             user_id=(
                 update.effective_user.id if update and update.effective_user else None

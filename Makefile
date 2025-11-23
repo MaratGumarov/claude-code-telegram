@@ -9,12 +9,12 @@ help:
 	@echo "  lint              - Run linting checks"
 	@echo "  format            - Format code"
 	@echo "  clean             - Clean up generated files"
-	@echo "  run               - Run the bot"
+	@echo "  run               - Run the bot (foreground)"
 	@echo ""
 	@echo "Diff Viewer commands:"
 	@echo "  run-api           - Run API server for Web App"
 	@echo "  run-tunnel        - Run Cloudflare tunnel (requires cloudflared)"
-	@echo "  run-all           - Run API + tunnel in background"
+	@echo "  run-all           - Run bot + API + tunnel in background"
 	@echo "  stop-all          - Stop all background processes"
 	@echo "  setup-diff-viewer - Generate secret and show setup instructions"
 
@@ -75,42 +75,48 @@ run-all:
 	@echo "   Logs: tail -f /tmp/claude-api.log"
 	@echo ""
 	@echo "2. Starting Cloudflare tunnel..."
-	@command -v cloudflared >/dev/null 2>&1 || { echo "❌ cloudflared not installed. Run: brew install cloudflare/cloudflare/cloudflared"; exit 1; }
+	@command -v cloudflared >/dev/null 2>&1 || { echo "⚠️  cloudflared not installed (optional). Skipping tunnel..."; exit 0; }
 	@cloudflared tunnel --url http://localhost:8000 > /tmp/claude-tunnel.log 2>&1 & echo $$! > /tmp/claude-tunnel.pid
 	@echo "   Waiting for tunnel to start..."
-	@sleep 5
-	@TUNNEL_URL=$$(grep -o 'https://[^[:space:]]*\.trycloudflare\.com' /tmp/claude-tunnel.log | head -1); \
+	@sleep 8
+	@TUNNEL_URL=$$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/claude-tunnel.log | tail -1); \
 	if [ -n "$$TUNNEL_URL" ]; then \
 		echo "   ✅ Tunnel running (PID: $$(cat /tmp/claude-tunnel.pid))"; \
 		echo "   📍 URL: $$TUNNEL_URL"; \
-		echo ""; \
-		echo "3. Updating .env with tunnel URL..."; \
-		if grep -q "^WEBAPP_BASE_URL=" .env; then \
-			sed -i.bak "s|^WEBAPP_BASE_URL=.*|WEBAPP_BASE_URL=$$TUNNEL_URL|" .env && rm .env.bak; \
-			echo "   ✅ Updated WEBAPP_BASE_URL in .env"; \
-		else \
-			echo "WEBAPP_BASE_URL=$$TUNNEL_URL" >> .env; \
-			echo "   ✅ Added WEBAPP_BASE_URL to .env"; \
-		fi; \
-		echo ""; \
-		echo "4. Now run the bot:"; \
-		echo "   make run"; \
+		echo "$$TUNNEL_URL" > /tmp/claude-tunnel-url.txt; \
 	else \
-		echo "   ❌ Failed to get tunnel URL. Check logs:"; \
-		echo "   tail -f /tmp/claude-tunnel.log"; \
+		echo "   ⚠️  Failed to get tunnel URL. Web App diff viewer will not work."; \
+		echo "   Check logs: tail -f /tmp/claude-tunnel.log"; \
 	fi
 	@echo ""
+	@echo "3. Starting Telegram bot..."
+	@if [ -f /tmp/claude-tunnel-url.txt ]; then \
+		WEBAPP_BASE_URL=$$(cat /tmp/claude-tunnel-url.txt) poetry run python -m src.main > /tmp/claude-bot.log 2>&1 & echo $$! > /tmp/claude-bot.pid; \
+		echo "   ✅ Bot running with tunnel URL: $$(cat /tmp/claude-tunnel-url.txt)"; \
+	else \
+		poetry run python -m src.main > /tmp/claude-bot.log 2>&1 & echo $$! > /tmp/claude-bot.pid; \
+		echo "   ✅ Bot running (using .env URL)"; \
+	fi
+	@sleep 2
+	@echo "   PID: $$(cat /tmp/claude-bot.pid)"
+	@echo "   Logs: tail -f /tmp/claude-bot.log"
+	@echo ""
+	@echo "✅ All components started!"
+	@echo ""
 	@echo "Logs:"
+	@echo "  Bot:    tail -f /tmp/claude-bot.log"
 	@echo "  API:    tail -f /tmp/claude-api.log"
-	@echo "  Tunnel: tail -f /tmp/claude-tunnel.log"
+	@if [ -f /tmp/claude-tunnel.pid ]; then echo "  Tunnel: tail -f /tmp/claude-tunnel.log"; fi
 	@echo ""
 	@echo "To stop all: make stop-all"
 
 # Stop all background processes
 stop-all:
-	@echo "Stopping all components..."
-	@if [ -f /tmp/claude-api.pid ]; then kill $$(cat /tmp/claude-api.pid) 2>/dev/null && rm /tmp/claude-api.pid && echo "✅ API server stopped"; fi
-	@if [ -f /tmp/claude-tunnel.pid ]; then kill $$(cat /tmp/claude-tunnel.pid) 2>/dev/null && rm /tmp/claude-tunnel.pid && echo "✅ Tunnel stopped"; fi
+	@echo "🛑 Stopping all components..."
+	@if [ -f /tmp/claude-bot.pid ]; then kill $$(cat /tmp/claude-bot.pid) 2>/dev/null && rm /tmp/claude-bot.pid && echo "   ✅ Bot stopped"; fi
+	@if [ -f /tmp/claude-api.pid ]; then kill $$(cat /tmp/claude-api.pid) 2>/dev/null && rm /tmp/claude-api.pid && echo "   ✅ API server stopped"; fi
+	@if [ -f /tmp/claude-tunnel.pid ]; then kill $$(cat /tmp/claude-tunnel.pid) 2>/dev/null && rm /tmp/claude-tunnel.pid && echo "   ✅ Tunnel stopped"; fi
+	@echo "   All components stopped."
 
 # Setup diff viewer - generate secret and show instructions
 setup-diff-viewer:

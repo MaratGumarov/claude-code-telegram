@@ -29,6 +29,11 @@ async def auth_middleware(handler: Callable, event: Any, data: Dict[str, Any]) -
         logger.warning("No user information in update")
         return
 
+    # Ignore messages from bots (including ourselves)
+    if event.effective_user and getattr(event.effective_user, "is_bot", False):
+        logger.debug("Ignoring message from bot", user_id=user_id, username=username)
+        return
+
     # Get dependencies from context
     auth_manager = data.get("auth_manager")
     audit_logger = data.get("audit_logger")
@@ -82,14 +87,7 @@ async def auth_middleware(handler: Callable, event: Any, data: Dict[str, Any]) -
             auth_provider=session.auth_provider if session else None,
         )
 
-        # Welcome message for new session
-        if event.effective_message:
-            await event.effective_message.reply_text(
-                f"🔓 Welcome! You are now authenticated.\n"
-                f"Session started at {datetime.utcnow().strftime('%H:%M:%S UTC')}"
-            )
-
-        # Continue to handler
+        # Continue to handler (no welcome message to reduce spam)
         return await handler(event, data)
 
     else:
